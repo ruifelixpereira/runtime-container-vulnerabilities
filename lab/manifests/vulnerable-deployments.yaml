@@ -1,0 +1,166 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vuln-test
+---
+# ── Vulnerable nginx (1.14.0) ──────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vuln-nginx
+  namespace: vuln-test
+  labels:
+    app: vuln-nginx
+    test-type: vulnerable
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vuln-nginx
+  template:
+    metadata:
+      labels:
+        app: vuln-nginx
+        test-type: vulnerable
+    spec:
+      imagePullSecrets:
+        - name: acr-secret
+      containers:
+        - name: nginx
+          image: __ACR_LOGIN_SERVER__/vuln/nginx:1.16.0
+          ports:
+            - containerPort: 80
+          resources:
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+---
+# ── Vulnerable Node.js (12-alpine, EOL) ────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vuln-node
+  namespace: vuln-test
+  labels:
+    app: vuln-node
+    test-type: vulnerable
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vuln-node
+  template:
+    metadata:
+      labels:
+        app: vuln-node
+        test-type: vulnerable
+    spec:
+      imagePullSecrets:
+        - name: acr-secret
+      containers:
+        - name: node
+          image: __ACR_LOGIN_SERVER__/vuln/node:14-alpine
+          command: ["node", "-e", "setInterval(() => {}, 60000)"]
+          resources:
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+---
+# ── Vulnerable httpd (2.4.29) ──────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vuln-httpd
+  namespace: vuln-test
+  labels:
+    app: vuln-httpd
+    test-type: vulnerable
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vuln-httpd
+  template:
+    metadata:
+      labels:
+        app: vuln-httpd
+        test-type: vulnerable
+    spec:
+      imagePullSecrets:
+        - name: acr-secret
+      containers:
+        - name: httpd
+          image: __ACR_LOGIN_SERVER__/vuln/httpd:2.4.41
+          ports:
+            - containerPort: 80
+          resources:
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+---
+# ── Vulnerable Redis (5.0.0) ───────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vuln-redis
+  namespace: vuln-test
+  labels:
+    app: vuln-redis
+    test-type: vulnerable
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vuln-redis
+  template:
+    metadata:
+      labels:
+        app: vuln-redis
+        test-type: vulnerable
+    spec:
+      imagePullSecrets:
+        - name: acr-secret
+      containers:
+        - name: redis
+          image: __ACR_LOGIN_SERVER__/vuln/redis:6.0.0
+          ports:
+            - containerPort: 6379
+          resources:
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+---
+# ── Vulnerable PostgreSQL (9.6, EOL) ───────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vuln-postgres
+  namespace: vuln-test
+  labels:
+    app: vuln-postgres
+    test-type: vulnerable
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vuln-postgres
+  template:
+    metadata:
+      labels:
+        app: vuln-postgres
+        test-type: vulnerable
+    spec:
+      imagePullSecrets:
+        - name: acr-secret
+      containers:
+        - name: postgres
+          image: __ACR_LOGIN_SERVER__/vuln/postgres:12.2
+          env:
+            - name: POSTGRES_PASSWORD
+              value: "testonly-not-production"
+          ports:
+            - containerPort: 5432
+          resources:
+            limits:
+              memory: "256Mi"
+              cpu: "200m"

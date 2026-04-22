@@ -1,0 +1,30 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - apt-transport-https
+  - ca-certificates
+  - gnupg
+  - lsb-release
+  - jq
+  - unzip
+
+runcmd:
+  # Install k3s (lightweight Kubernetes)
+  - curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--write-kubeconfig-mode 644 --disable traefik" sh -
+  # Wait for k3s to be ready
+  - until kubectl get nodes 2>/dev/null | grep -q " Ready"; do sleep 5; done
+  # Make kubeconfig available system-wide
+  - export ADMIN_USER=$(ls /home/ | head -1)
+  - mkdir -p /home/$ADMIN_USER/.kube
+  - cp /etc/rancher/k3s/k3s.yaml /home/$ADMIN_USER/.kube/config
+  - sed -i "s/127.0.0.1/$(hostname -I | awk '{print $1}')/g" /home/$ADMIN_USER/.kube/config
+  - chown -R $ADMIN_USER:$ADMIN_USER /home/$ADMIN_USER/.kube
+  # Install Azure CLI
+  - curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+  # Install Helm (needed for Arc agent)
+  - curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  # Signal that setup is complete
+  - touch /home/$ADMIN_USER/.lab-setup-complete
