@@ -74,28 +74,80 @@ REPORT=$(jq -n \
 
     ($severity | severity_rank) as $threshold |
 
-    # Build a lookup map: imageDigest -> vulnerability info
-    ($vulns[0] | map({key: .imageDigest, value: .}) | from_entries) as $vuln_map |
+    # Build lookup maps for vulnerability info
+    # 1st priority: by manifestDigest (the Docker-Content-Digest from ACR — what Defender uses)
+    # 2nd priority: by imageDigest from kubectl (image ID on the node)
+    # 3rd priority: by configDigest (image config from ACR manifest)
+    # 4th priority: by layer digest (matches if Defender digest is a layer in the image)
+    ($vulns[0] | map({key: .imageDigest, value: .}) | from_entries) as $vuln_by_digest |
+
+    # Build a set of all vulnerability digests for layer matching
+    ($vulns[0] | [.[] | .imageDigest] | unique) as $all_vuln_digests |
 
     # Match running images against vulnerability findings
     [
         $images[0][] |
-        select(.imageDigest != null) |
         . as $container |
-        $vuln_map[.imageDigest] // null |
+
+        # Layer-based match: check if any vuln digest is in the container layer digests
+        (
+            if ($container.layerDigests // []) | length > 0 then
+                ([$all_vuln_digests[] | . as $vd | select($container.layerDigests | index($vd))] | .[0] // null) as $matched_layer |
+                if $matched_layer != null then $vuln_by_digest[$matched_layer] else null end
+            else null end
+        ) as $layer_match |
+
+        # Check configDigest
+        (
+            if $container.configDigest != null then
+                $vuln_by_digest[$container.configDigest] // null
+            else null end
+        ) as $config_match |
+
+        # Check manifestDigest (from Docker-Content-Digest header — what Defender reports)
+        (
+            if $container.manifestDigest != null and $container.manifestDigest != "" then
+                $vuln_by_digest[$container.manifestDigest] // null
+            else null end
+        ) as $manifest_match |
+
+        # Try matching in priority order: manifest → image ID → config → layers
+        (
+            $manifest_match
+        ) // (
+            if $container.imageDigest != null then
+                $vuln_by_digest[$container.imageDigest] // null
+            else null end
+        ) // (
+            $config_match
+        ) // (
+            $layer_match
+        ) |
+
         select(. != null) |
+        . as $vuln_info |
         {
             cluster: $container.cluster,
             namespace: $container.namespace,
             podName: $container.podName,
             containerName: $container.containerName,
             image: $container.image,
-            imageDigest: $container.imageDigest,
+            imageDigest: ($container.imageDigest // "N/A"),
+            matchedBy: (
+                if $manifest_match != null
+                then "manifest"
+                elif ($container.imageDigest != null and $vuln_by_digest[$container.imageDigest] != null)
+                then "digest"
+                elif $config_match != null
+                then "config"
+                else "layer"
+                end
+            ),
             containerState: $container.state,
-            registry: .registry,
-            repositoryName: .repositoryName,
+            registry: $vuln_info.registry,
+            repositoryName: $vuln_info.repositoryName,
             vulnerabilities: [
-                .vulnerabilities[] |
+                $vuln_info.vulnerabilities[] |
                 select((.severity | severity_rank) <= $threshold)
             ],
             summary: {
@@ -120,15 +172,20 @@ REPORT=$(jq -n \
             containersWithDigest: [$images[0][] | select(.imageDigest != null)] | length,
             vulnerableContainers: length,
             uniqueVulnerableImages: ([.[].imageDigest] | unique | length),
-            totalFindings: [.[].summary.total] | add // 0,
+            totalFindings: (([.[].summary.total] | add) // 0),
             bySeverity: {
-                critical: [.[].summary.critical] | add // 0,
-                high: [.[].summary.high] | add // 0,
-                medium: [.[].summary.medium] | add // 0,
-                low: [.[].summary.low] | add // 0
+                critical: (([.[].summary.critical] | add) // 0),
+                high: (([.[].summary.high] | add) // 0),
+                medium: (([.[].summary.medium] | add) // 0),
+                low: (([.[].summary.low] | add) // 0)
             },
-            totalPatchable: [.[].summary.patchable] | add // 0
+            totalPatchable: (([.[].summary.patchable] | add) // 0)
         },
+        runningContainers: [
+            $images[0][] |
+            select(.imageDigest != null) |
+            {namespace, podName, containerName, image, imageDigest, state}
+        ] | sort_by(.namespace, .podName),
         vulnerableContainers: .
     }
 ')
@@ -163,6 +220,23 @@ output_table() {
     echo -e "  Patchable: $(echo "$data" | jq -r '.summary.totalPatchable')"
     echo ""
 
+    # Running containers and digests
+    echo -e "${BOLD}Running Containers & Image Digests${NC}"
+    echo ""
+    printf "%-18s %-30s %-15s %-45s %s\n" \
+        "NAMESPACE" "POD" "CONTAINER" "IMAGE" "DIGEST"
+    printf "%-18s %-30s %-15s %-45s %s\n" \
+        "---------" "---" "---------" "-----" "------"
+
+    echo "$data" | jq -r '
+        .runningContainers[] |
+        [.namespace, .podName, .containerName, .image, (.imageDigest // "N/A")] |
+        @tsv' | while IFS=$'\t' read -r ns pod container image digest; do
+        printf "%-18s %-30s %-15s %-45s %s\n" \
+            "$ns" "${pod:0:30}" "$container" "${image:0:45}" "${digest:0:20}..."
+    done
+    echo ""
+
     # Vulnerable containers table
     local vuln_count
     vuln_count=$(echo "$data" | jq '.vulnerableContainers | length')
@@ -174,18 +248,19 @@ output_table() {
 
     echo -e "${BOLD}Vulnerable Containers${NC}"
     echo ""
-    printf "%-20s %-20s %-30s %-15s %-6s %-6s %-6s %-6s\n" \
-        "CLUSTER" "NAMESPACE" "POD" "CONTAINER" "CRIT" "HIGH" "MED" "PATCH"
-    printf "%-20s %-20s %-30s %-15s %-6s %-6s %-6s %-6s\n" \
-        "-------" "---------" "---" "---------" "----" "----" "---" "-----"
+    printf "%-18s %-28s %-14s %-6s %-6s %-6s %-6s %-10s\n" \
+        "NAMESPACE" "POD" "CONTAINER" "CRIT" "HIGH" "MED" "PATCH" "MATCHED BY"
+    printf "%-18s %-28s %-14s %-6s %-6s %-6s %-6s %-10s\n" \
+        "---------" "---" "---------" "----" "----" "---" "-----" "----------"
 
     echo "$data" | jq -r '.vulnerableContainers[] |
-        [.cluster, .namespace, .podName, .containerName,
+        [.namespace, .podName, .containerName,
          (.summary.critical | tostring), (.summary.high | tostring),
-         (.summary.medium | tostring), (.summary.patchable | tostring)] |
-        @tsv' | while IFS=$'\t' read -r cluster ns pod container crit_c high_c med_c patch_c; do
-        printf "%-20s %-20s %-30s %-15s %-6s %-6s %-6s %-6s\n" \
-            "$cluster" "$ns" "$pod" "$container" "$crit_c" "$high_c" "$med_c" "$patch_c"
+         (.summary.medium | tostring), (.summary.patchable | tostring),
+         .matchedBy] |
+        @tsv' | while IFS=$'\t' read -r ns pod container crit_c high_c med_c patch_c matched; do
+        printf "%-18s %-28s %-14s %-6s %-6s %-6s %-6s %-10s\n" \
+            "$ns" "${pod:0:28}" "$container" "$crit_c" "$high_c" "$med_c" "$patch_c" "$matched"
     done
 
     echo ""
@@ -201,7 +276,7 @@ output_table() {
         sort_by(
             (if .severity == "Critical" then 0 elif .severity == "High" then 1
              elif .severity == "Medium" then 2 else 3 end),
-            (-.cvss // 0)
+            (-(.cvss // 0))
         ) |
         .[:20][] |
         [.cveId, .severity, (.cvss // 0 | tostring),
@@ -214,12 +289,12 @@ output_table() {
 
 output_csv() {
     local data="$1"
-    echo "cluster,namespace,pod,container,image,imageDigest,state,cveId,severity,cvss,patchable,description"
+    echo "cluster,namespace,pod,container,image,imageDigest,matchedBy,state,cveId,severity,cvss,patchable,description"
     echo "$data" | jq -r '.vulnerableContainers[] |
         . as $c |
         .vulnerabilities[] |
         [$c.cluster, $c.namespace, $c.podName, $c.containerName, $c.image,
-         $c.imageDigest, $c.containerState, .cveId, .severity,
+         $c.imageDigest, $c.matchedBy, $c.containerState, .cveId, .severity,
          (.cvss // 0 | tostring), (.patchable | tostring),
          (.description // "" | gsub(","; ";"))] |
         @csv'

@@ -2,15 +2,16 @@ securityresources
 | where type == "microsoft.security/assessments/subassessments"
 | where properties.additionalData.assessedResourceType == "AzureContainerRegistryVulnerability"
 | extend
-    imageDigest = tostring(properties.additionalData.imageDigest),
-    repositoryName = tostring(properties.additionalData.repositoryName),
-    registry = tostring(properties.additionalData.registryHost),
+    imageDigest = tostring(properties.additionalData.artifactDetails.digest),
+    repositoryName = tostring(properties.additionalData.artifactDetails.repositoryName),
+    registry = tostring(properties.additionalData.artifactDetails.registryHost),
+    imageTag = tostring(properties.additionalData.artifactDetails.tags[0]),
     cveId = tostring(properties.displayName),
     severity = tostring(properties.status.severity),
     patchable = tobool(properties.additionalData.patchable),
     description = tostring(properties.description),
     cvss = toreal(properties.additionalData.cvss.base),
-    publishedDate = todatetime(properties.additionalData.publishedDate)
-| project imageDigest, repositoryName, registry, cveId, severity, patchable, description, cvss, publishedDate
+    publishedDate = todatetime(properties.additionalData.vulnerabilityDetails.publishedDate)
+| project imageDigest, repositoryName, registry, imageTag, cveId, severity, patchable, description, cvss, publishedDate
 | where isnotempty(imageDigest)
 | order by severity asc, cvss desc

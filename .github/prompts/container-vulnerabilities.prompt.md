@@ -33,14 +33,14 @@ securityresources
 | where type == "microsoft.security/assessments/subassessments"
 | where properties.additionalData.assessedResourceType == "AzureContainerRegistryVulnerability"
 | extend
-    imageDigest = tostring(properties.additionalData.imageDigest),
-    repositoryName = tostring(properties.additionalData.repositoryName),
-    registry = tostring(properties.additionalData.registryHost),
-    cveId = tostring(properties.id),
+    imageDigest = tostring(properties.additionalData.artifactDetails.digest),
+    repositoryName = tostring(properties.additionalData.artifactDetails.repositoryName),
+    registry = tostring(properties.additionalData.artifactDetails.registryHost),
+    imageTag = tostring(properties.additionalData.artifactDetails.tags[0]),
+    cveId = tostring(properties.displayName),
     severity = tostring(properties.status.severity),
     patchable = tobool(properties.additionalData.patchable),
-    description = tostring(properties.description),
-    displayName = tostring(properties.displayName)
+    description = tostring(properties.description)
 ```
 
 ### 2. Running Container Images (Arc-enabled K8s)
@@ -75,6 +75,7 @@ container-vulnerabilities/
 │   ├── check-vulnerabilities.sh       # Main orchestrator script
 │   ├── query-acr-vulnerabilities.sh   # Query Defender findings from ARG
 │   ├── query-running-images.sh        # Get running images from Arc K8s
+│   ├── resolve-image-layers.sh        # Resolve image layers from ACR registry
 │   ├── cross-reference.sh             # Match and generate report
 │   └── common.sh                      # Shared utilities, logging, colors
 ├── queries/
@@ -123,17 +124,35 @@ OUTPUT_FORMAT="table"           # table, json, csv
    a. Establish `az connectedk8s proxy` (background process)
    b. Call `query-running-images.sh` → produces `/tmp/running-images-{cluster}.json`
    c. Kill the proxy
-5. Call `cross-reference.sh` → matches image digests, produces final report
-6. Output report to stdout and optionally to `output/` directory
+5. Call `resolve-image-layers.sh` → queries ACR v2 API for manifests, enriches images with layer/config digests (skip with `--no-layers`)
+6. Call `cross-reference.sh` → matches images using 5-tier strategy, produces final report
+7. Output report to stdout and optionally to `output/` directory
 
 ### Image Matching Logic
 
-Match by **image digest** (sha256 hash). The flow:
+Match using a 3-tier digest-based strategy. Defender for Containers reports digests that may correspond to the image manifest, config, or individual layers, so all are checked:
 
-1. From Defender findings: extract `imageDigest` (format: `sha256:abc123...`)
-2. From running pods: extract `status.containerStatuses[].imageID` which includes the digest
-3. Parse the digest from the imageID field (format: `registry/repo@sha256:abc123...`)
-4. Match digests → for each match, the running container is vulnerable
+The flow:
+
+1. From Defender findings: extract `imageDigest` (the digest Defender associates with the vulnerability)
+2. From running pods: extract `status.containerStatuses[].imageID` for the image manifest digest
+3. Resolve image manifests from ACR to get the config digest and all layer digests
+4. Match in priority order:
+   - **1st — `digest`**: image manifest digest (sha256) from kubectl imageID == imageDigest from Defender
+   - **2nd — `config`**: image config digest from ACR manifest == imageDigest from Defender
+   - **3rd — `layer`**: any layer digest from ACR manifest == imageDigest from Defender
+5. Report shows which method matched each container (`matchedBy: digest | config | layer`)
+
+### Layer Resolution (optional, enabled by default)
+
+The `resolve-image-layers.sh` script queries the ACR v2 API to fetch image manifests:
+1. For each unique ACR image in running containers, gets an access token via `az acr login --expose-token`
+2. Fetches the Docker v2 / OCI manifest from `GET /v2/{repo}/manifests/{ref}`
+3. Handles multi-arch images by resolving the linux/amd64 platform manifest
+4. Extracts the config digest and all layer digests
+5. Enriches the running images JSON with `configDigest` and `layerDigests` fields
+
+This can be skipped with `--no-layers` flag for faster (but less precise) matching.
 
 ### Output Report Format
 
@@ -166,17 +185,18 @@ securityresources
 | where type == "microsoft.security/assessments/subassessments"
 | where properties.additionalData.assessedResourceType == "AzureContainerRegistryVulnerability"
 | extend
-    imageDigest = tostring(properties.additionalData.imageDigest),
-    repositoryName = tostring(properties.additionalData.repositoryName),
-    registry = tostring(properties.additionalData.registryHost),
+    imageDigest = tostring(properties.additionalData.artifactDetails.digest),
+    repositoryName = tostring(properties.additionalData.artifactDetails.repositoryName),
+    registry = tostring(properties.additionalData.artifactDetails.registryHost),
+    imageTag = tostring(properties.additionalData.artifactDetails.tags[0]),
     cveId = tostring(properties.displayName),
     severity = tostring(properties.status.severity),
     patchable = tobool(properties.additionalData.patchable),
     description = tostring(properties.description),
     cvss = toreal(properties.additionalData.cvss.base),
-    publishedDate = todatetime(properties.additionalData.publishedDate),
+    publishedDate = todatetime(properties.additionalData.vulnerabilityDetails.publishedDate),
     assessmentTime = todatetime(properties.timeGenerated)
-| project imageDigest, repositoryName, registry, cveId, severity, patchable, description, cvss, publishedDate, assessmentTime
+| project imageDigest, repositoryName, registry, imageTag, cveId, severity, patchable, description, cvss, publishedDate, assessmentTime
 | where isnotempty(imageDigest)
 | order by severity asc, cvss desc
 ```

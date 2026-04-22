@@ -22,6 +22,7 @@ Options:
     --severity LEVEL        Minimum severity: Critical, High, Medium, Low (default: Medium)
     --format FORMAT         Output: table, json, csv (default: table)
     --save                  Save report to output/ directory
+    --no-layers             Skip ACR layer resolution (faster, less precise matching)
     --help                  Show this help message
 
 Examples:
@@ -44,6 +45,7 @@ EXCLUDE_NS="${NAMESPACES_EXCLUDE:-kube-system,kube-public,kube-node-lease,gateke
 SEVERITY="${SEVERITY_THRESHOLD:-Medium}"
 FORMAT="${OUTPUT_FORMAT:-table}"
 SAVE=false
+RESOLVE_LAYERS=true
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -55,6 +57,7 @@ while [[ $# -gt 0 ]]; do
         --severity) SEVERITY="$2"; shift 2 ;;
         --format) FORMAT="$2"; shift 2 ;;
         --save) SAVE=true; shift ;;
+        --no-layers) RESOLVE_LAYERS=false; shift ;;
         --help) usage ;;
         *) log_error "Unknown option: $1"; usage ;;
     esac
@@ -108,6 +111,17 @@ IMAGE_COUNT=$(jq 'length' "$IMAGES_FILE")
 if [[ "$IMAGE_COUNT" -eq 0 ]]; then
     log_warn "No running containers found. Nothing to cross-reference."
     exit 0
+fi
+
+# Step 3b: Resolve image layers from ACR (optional but recommended)
+if [[ "$RESOLVE_LAYERS" == true ]]; then
+    log_header "Step 3b: Resolving Image Layers from ACR"
+    ENRICHED_FILE="${TMP_PREFIX}-images-enriched.json"
+    "$SCRIPT_DIR/resolve-image-layers.sh" --images "$IMAGES_FILE" --output "$ENRICHED_FILE" || {
+        log_warn "Layer resolution failed — continuing with basic matching"
+        ENRICHED_FILE="$IMAGES_FILE"
+    }
+    IMAGES_FILE="$ENRICHED_FILE"
 fi
 
 # Step 4: Cross-reference and generate report

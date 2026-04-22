@@ -192,10 +192,10 @@ ACR_LOGIN_SERVER=$(az acr show --name "$ACR_NAME" --query loginServer -o tsv 2>/
 VULN_QUERY="securityresources
 | where type == 'microsoft.security/assessments/subassessments'
 | where properties.additionalData.assessedResourceType == 'AzureContainerRegistryVulnerability'
-| where properties.additionalData.registryHost =~ '${ACR_LOGIN_SERVER}'
+| where properties.additionalData.artifactDetails.registryHost =~ '${ACR_LOGIN_SERVER}'
 | summarize
     totalFindings = count(),
-    uniqueImages = dcount(tostring(properties.additionalData.imageDigest)),
+    uniqueImages = dcount(tostring(properties.additionalData.artifactDetails.digest)),
     critical = countif(properties.status.severity == 'Critical'),
     high = countif(properties.status.severity == 'High'),
     medium = countif(properties.status.severity == 'Medium'),
@@ -234,8 +234,8 @@ if [[ "$TOTAL_FINDINGS" -gt 0 && -n "$VM_IP" ]]; then
     VULN_DIGEST_QUERY="securityresources
 | where type == 'microsoft.security/assessments/subassessments'
 | where properties.additionalData.assessedResourceType == 'AzureContainerRegistryVulnerability'
-| where properties.additionalData.registryHost =~ '${ACR_LOGIN_SERVER}'
-| distinct tostring(properties.additionalData.imageDigest)"
+| where properties.additionalData.artifactDetails.registryHost =~ '${ACR_LOGIN_SERVER}'
+| distinct tostring(properties.additionalData.artifactDetails.digest)"
 
     VULN_DIGESTS=$(az graph query -q "$VULN_DIGEST_QUERY" --first 1000 -o json 2>/dev/null | \
         jq -r '.data[].Column1' 2>/dev/null || echo "")

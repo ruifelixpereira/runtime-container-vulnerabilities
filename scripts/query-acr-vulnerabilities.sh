@@ -111,7 +111,8 @@ GROUPED=$(echo "$FILTERED" | jq '
         imageDigest: .[0].imageDigest,
         repositoryName: .[0].repositoryName,
         registry: .[0].registry,
-        imageRef: (.[0].registry + "/" + .[0].repositoryName + "@" + .[0].imageDigest),
+        imageTag: (.[0].imageTag // ""),
+        imageRef: (.[0].registry + "/" + .[0].repositoryName + (if .[0].imageTag != "" and .[0].imageTag != null then ":" + .[0].imageTag else "" end) + "@" + .[0].imageDigest),
         vulnerabilities: [.[] | {cveId, severity, patchable, description, cvss, publishedDate}],
         summary: {
             total: length,

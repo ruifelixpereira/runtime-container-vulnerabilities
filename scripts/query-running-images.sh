@@ -63,40 +63,79 @@ fi
 # Build jq namespace exclusion filter
 EXCLUDE_FILTER=$(echo "$EXCLUDE_NS" | tr ',' '\n' | jq -R . | jq -s '.')
 
+# jq filter to extract container image info from pod JSON
+JQ_EXTRACT_IMAGES='
+    [
+        .items[] |
+        select(.metadata.namespace as $ns | ($exclude | index($ns)) | not) |
+        . as $pod |
+        (
+            (.status.containerStatuses // []) +
+            (.status.initContainerStatuses // [])
+        )[] |
+        {
+            cluster: $cluster,
+            namespace: $pod.metadata.namespace,
+            podName: $pod.metadata.name,
+            containerName: .name,
+            image: .image,
+            imageID: .imageID,
+            imageDigest: (
+                if .imageID then
+                    (.imageID | capture("(?<digest>sha256:[a-f0-9]+)") | .digest) // null
+                else null end
+            ),
+            state: (
+                if .state.running then "running"
+                elif .state.waiting then "waiting"
+                elif .state.terminated then "terminated"
+                else "unknown" end
+            ),
+            ready: .ready
+        }
+    ]
+'
+
 ALL_IMAGES="[]"
 
 for CLUSTER in $CLUSTER_LIST; do
     CLUSTER=$(echo "$CLUSTER" | xargs) # trim
     log_info "Processing cluster: $CLUSTER"
 
-    # Start connectedk8s proxy in background
     PROXY_PORT=$((RANDOM % 10000 + 40000))
     KUBECONFIG_FILE="${TMP_PREFIX}-kubeconfig-${CLUSTER}"
 
+    PROXY_LOG="${TMP_PREFIX}-proxy-${CLUSTER}.log"
+
     log_info "  Establishing Arc proxy on port $PROXY_PORT..."
 
-    # Use az connectedk8s proxy to get a kubeconfig
     az connectedk8s proxy \
         --name "$CLUSTER" \
         --resource-group "$RG" \
         --port "$PROXY_PORT" \
-        --file "$KUBECONFIG_FILE" &
+        --file "$KUBECONFIG_FILE" &>"$PROXY_LOG" &
     PROXY_PID=$!
 
-    # Wait for proxy to be ready
-    MAX_WAIT=30
+    # Wait for proxy to be ready (up to 90s — first connection can be slow)
+    MAX_WAIT=90
     WAITED=0
     while [[ $WAITED -lt $MAX_WAIT ]]; do
-        if [[ -f "$KUBECONFIG_FILE" ]] && kubectl --kubeconfig "$KUBECONFIG_FILE" get nodes &>/dev/null 2>&1; then
+        if [[ -f "$KUBECONFIG_FILE" ]] && kubectl --kubeconfig "$KUBECONFIG_FILE" get nodes &>/dev/null; then
             break
         fi
-        sleep 2
-        WAITED=$((WAITED + 2))
+        sleep 5
+        WAITED=$((WAITED + 5))
+        if (( WAITED % 15 == 0 )); then
+            log_info "  Still waiting for Arc proxy... (${WAITED}s/${MAX_WAIT}s)"
+        fi
     done
 
     if [[ $WAITED -ge $MAX_WAIT ]]; then
         log_warn "  Failed to connect to cluster '$CLUSTER' after ${MAX_WAIT}s, skipping..."
+        log_warn "  Arc proxy log:"
+        cat "$PROXY_LOG" >&2
         kill "$PROXY_PID" 2>/dev/null || true
+        rm -f "$KUBECONFIG_FILE" "$PROXY_LOG" 2>/dev/null || true
         continue
     fi
 
@@ -107,38 +146,12 @@ for CLUSTER in $CLUSTER_LIST; do
         --all-namespaces \
         -o json 2>/dev/null || echo '{"items":[]}')
 
+    # Kill proxy and clean up
+    kill "$PROXY_PID" 2>/dev/null || true
+    rm -f "$KUBECONFIG_FILE" "$PROXY_LOG" 2>/dev/null || true
+
     # Extract running container images with their digests
-    CLUSTER_IMAGES=$(echo "$PODS_JSON" | jq --arg cluster "$CLUSTER" --argjson exclude "$EXCLUDE_FILTER" '
-        [
-            .items[] |
-            select(.metadata.namespace as $ns | ($exclude | index($ns)) | not) |
-            . as $pod |
-            (
-                (.status.containerStatuses // []) +
-                (.status.initContainerStatuses // [])
-            )[] |
-            {
-                cluster: $cluster,
-                namespace: $pod.metadata.namespace,
-                podName: $pod.metadata.name,
-                containerName: .name,
-                image: .image,
-                imageID: .imageID,
-                imageDigest: (
-                    if .imageID then
-                        (.imageID | capture("(?<digest>sha256:[a-f0-9]+)") | .digest) // null
-                    else null end
-                ),
-                state: (
-                    if .state.running then "running"
-                    elif .state.waiting then "waiting"
-                    elif .state.terminated then "terminated"
-                    else "unknown" end
-                ),
-                ready: .ready
-            }
-        ]
-    ')
+    CLUSTER_IMAGES=$(echo "$PODS_JSON" | jq --arg cluster "$CLUSTER" --argjson exclude "$EXCLUDE_FILTER" "$JQ_EXTRACT_IMAGES")
 
     CONTAINER_COUNT=$(echo "$CLUSTER_IMAGES" | jq 'length')
     UNIQUE_DIGESTS=$(echo "$CLUSTER_IMAGES" | jq '[.[].imageDigest | select(. != null)] | unique | length')
@@ -146,11 +159,6 @@ for CLUSTER in $CLUSTER_LIST; do
 
     # Merge into all images
     ALL_IMAGES=$(echo "$ALL_IMAGES" "$CLUSTER_IMAGES" | jq -s '.[0] + .[1]')
-
-    # Kill proxy
-    kill "$PROXY_PID" 2>/dev/null || true
-    rm -f "$KUBECONFIG_FILE" 2>/dev/null || true
-    log_info "  Disconnected from '$CLUSTER'"
 done
 
 TOTAL=$(echo "$ALL_IMAGES" | jq 'length')

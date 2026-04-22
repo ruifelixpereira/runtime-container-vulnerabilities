@@ -105,6 +105,15 @@ log_info "Verifying Arc pods on the VM..."
 ssh -o StrictHostKeyChecking=no "${ADMIN_USER}@${VM_IP}" \
     "KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl get pods -n azure-arc"
 
+# Create ClusterRoleBinding so the AAD user can access the cluster through Arc proxy
+AAD_USER=$(az ad signed-in-user show --query userPrincipalName -o tsv 2>/dev/null || true)
+if [[ -n "$AAD_USER" ]]; then
+    log_info "Creating ClusterRoleBinding for AAD user '$AAD_USER'..."
+    ssh -o StrictHostKeyChecking=no "${ADMIN_USER}@${VM_IP}" \
+        "KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl create clusterrolebinding arc-aad-admin --clusterrole=cluster-admin --user='${AAD_USER}' 2>/dev/null || true"
+    log_success "AAD user '$AAD_USER' granted cluster-admin via Arc proxy"
+fi
+
 # Verify from Azure side
 log_info "Verifying Arc cluster from Azure..."
 MAX_WAIT=60
